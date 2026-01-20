@@ -1,5 +1,6 @@
 import operator
 import os
+import time
 from typing import Annotated, List, TypedDict
 
 import streamlit as st
@@ -9,18 +10,18 @@ from langgraph.graph import END, StateGraph
 
 # --- 1. Page Config ---
 st.set_page_config(page_title="Deep Intelligence Squad", page_icon="🧠", layout="wide")
-st.title("🧠 Deep Intelligence Engine (Strict Mode)")
+st.title("🧠 Deep Intelligence Engine (Auto-Select Mode)")
 
-# --- 2. Imports & Setup ---
+# --- 2. Imports ---
 try:
     import google.generativeai as genai
     from langchain_google_genai import (ChatGoogleGenerativeAI,
                                         HarmBlockThreshold, HarmCategory)
 except ImportError as e:
-    st.error(f"CRITICAL: Missing Libraries. {e}")
+    st.error(f"Missing Libraries: {e}")
     st.stop()
 
-# --- 3. CONNECTION DIAGNOSTIC TOOL ---
+# --- 3. AGGRESSIVE AUTO-SELECTION (The Fix) ---
 def connect_to_google():
     # 1. Get Key
     if "GOOGLE_API_KEY" in st.secrets:
@@ -30,40 +31,43 @@ def connect_to_google():
     
     clean_key = api_key.strip().strip('"').strip("'")
     if not clean_key:
-        st.error("🚨 STOP: No API Key found.")
+        st.error("🚨 No API Key found.")
         st.stop()
 
-    # 2. Configure SDK
     genai.configure(api_key=clean_key)
     
-    # 3. LIST PERMITTED MODELS (Debug Info)
-    available_models = []
+    # 2. ASK GOOGLE FOR THE EXACT NAMES
+    # We do not guess. We take what is given.
+    valid_models = []
     try:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
+                valid_models.append(m.name)
     except Exception as e:
-        st.error(f"🚨 API Key Check Failed: {e}")
+        st.error(f"Connection Failed: {e}")
         st.stop()
 
-    # Show available models in sidebar for proof
-    st.sidebar.success(f"✅ Key Validated!")
-    with st.sidebar.expander("Authorized Models"):
-        for m in available_models:
-            st.write(f"- `{m}`")
+    if not valid_models:
+        st.error("🚨 Your API Key has access to ZERO models. Please enable 'Generative Language API' in Google Cloud Console.")
+        st.stop()
 
-    # 4. SELECT THE BEST MODEL
-    # We prefer Flash, but if not found, we take Pro, then whatever is first.
-    selected_model = "models/gemini-pro" # Safe default
+    # 3. DEBUG: Show User what was found
+    with st.sidebar.expander("✅ Validated Models (Source of Truth)", expanded=True):
+        st.write(valid_models)
+
+    # 4. SELECT THE BEST AVAILABLE
+    # We prioritize Flash, then Pro, then whatever is first.
+    selected_model = valid_models[0] # Default to the first valid one
     
-    for m in available_models:
-        if "gemini-1.5-flash" in m:
+    # Try to find a better one in the list
+    for m in valid_models:
+        if "flash" in m and "1.5" in m:
             selected_model = m
             break
     
-    st.sidebar.info(f"Using: **{selected_model}**")
+    st.sidebar.success(f"Connected to: **{selected_model}**")
 
-    # 5. CONNECT LANGCHAIN
+    # 5. CONNECT
     safety_config = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -71,22 +75,16 @@ def connect_to_google():
         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
     }
 
-    try:
-        llm = ChatGoogleGenerativeAI(
-            model=selected_model,
-            google_api_key=clean_key,
-            transport="rest",  # CRITICAL FIX for connection stability
-            safety_settings=safety_config,
-            temperature=0
-        )
-        # Final Handshake
-        llm.invoke("Hi")
-        return llm
-    except Exception as e:
-        st.error(f"🚨 Model Connection Failed: {e}")
-        st.stop()
+    llm = ChatGoogleGenerativeAI(
+        model=selected_model,
+        google_api_key=clean_key,
+        transport="rest",
+        safety_settings=safety_config,
+        temperature=0
+    )
+    return llm
 
-# Initialize (This will stop the app if it fails, NO MOCKS)
+# Initialize
 llm = connect_to_google()
 
 # --- 4. Search Tool ---
@@ -97,8 +95,7 @@ class RealSearchTool:
                 results = DDGS().text(query, max_results=5)
                 if results:
                     return str(results)
-                else:
-                    return "No results found."
+                return "No web results found."
         except Exception as e:
             return f"Search Error: {e}"
 
@@ -132,7 +129,6 @@ def analyst_node(state: AgentState):
     
     messages = [SystemMessage(content=prompt), HumanMessage(content=f"DATA:\n{research_data}")]
     
-    # Direct Call (Will crash if LLM fails, verifying real connection)
     response = llm.invoke(messages)
     return {"draft_brief": response.content}
 
@@ -166,8 +162,8 @@ app = workflow.compile()
 # --- 7. UI ---
 topic = st.text_input("Enter Topic:", placeholder="e.g. OpenAI vs Anthropic")
 
-if st.button("Run Real Intelligence"):
-    with st.status("🚀 Running Strict Mode (No Mocks)...", expanded=True) as status:
+if st.button("Generate Intelligence"):
+    with st.status("🚀 Running...", expanded=True) as status:
         st.write("🌍 Searching real web...")
         try:
             result = app.invoke({"topic": topic})
