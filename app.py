@@ -10,10 +10,9 @@ from langgraph.graph import END, StateGraph
 # --- 1. Page Config ---
 st.set_page_config(page_title="Meeting Prep Squad", page_icon="🤖")
 st.title("🤖 Multi-Agent Meeting Prep Squad")
-st.markdown("### Powered by LangGraph & Gemini Flash")
+st.markdown("### Powered by LangGraph & Google Gemini")
 
-# --- 2. API Key Setup & Sanitization ---
-# Get key from Secrets or Env
+# --- 2. API Key Setup ---
 if "GOOGLE_API_KEY" in st.secrets:
     raw_key = st.secrets["GOOGLE_API_KEY"]
 elif "GOOGLE_API_KEY" in os.environ:
@@ -22,30 +21,46 @@ else:
     st.error("🚨 Missing Google API Key.")
     st.stop()
 
-# CLEAN THE KEY: Remove quotes (" or ') and whitespace
+# Sanitize Key
 api_key = raw_key.strip().strip('"').strip("'")
 
-# --- 3. Immediate Connection Test ---
-# We test the key right now. If this fails, the app stops here with a clear message.
-try:
-    test_llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash", 
-        google_api_key=api_key
-    )
-    # Simple handshake
-    test_llm.invoke("Hello")
-except Exception as e:
-    st.error("❌ API Key Connection Failed")
-    st.markdown(f"**Error Details:** `{e}`")
-    st.warning(
-        "**Possible Causes:**\n"
-        "1. **API Not Enabled:** Go to [Google Cloud Console](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com) and enable 'Generative Language API'.\n"
-        "2. **Bad Key:** You might need to generate a new key.\n"
-        "3. **Billing:** (Rare) Your free quota might be exhausted."
-    )
+# --- 3. ROBUST MODEL LOADER (The Fix) ---
+# This function tries multiple model names until one works.
+def get_working_llm(api_key):
+    # List of models to try in order of preference
+    candidates = [
+        "gemini-1.5-flash",      # Preferred
+        "gemini-1.5-flash-001",  # Alternative ID
+        "gemini-1.5-pro",        # Stronger model
+        "gemini-pro"             # Old reliable (Fall back to this)
+    ]
+    
+    status_placeholder = st.empty()
+    
+    for model in candidates:
+        try:
+            # Try initializing and sending a test message
+            test_llm = ChatGoogleGenerativeAI(
+                model=model, 
+                google_api_key=api_key,
+                temperature=0
+            )
+            test_llm.invoke("test connection") # Handshake
+            status_placeholder.caption(f"✅ Connected to model: `{model}`")
+            return test_llm
+        except Exception as e:
+            # If it fails, print a small debug note and continue to next model
+            print(f"Failed to connect to {model}: {e}")
+            continue
+            
+    # If we loop through all and none work:
+    status_placeholder.error("❌ Could not connect to any Gemini models.")
     st.stop()
 
-# --- 4. Resilient Tool Setup ---
+# Initialize the LLM using the resilient loader
+llm = get_working_llm(api_key)
+
+# --- 4. Tool Setup ---
 try:
     from langchain_community.tools import DuckDuckGoSearchRun
     search_tool = DuckDuckGoSearchRun()
@@ -64,13 +79,7 @@ except Exception:
 
 st.sidebar.caption(f"System Status: {tool_status}")
 
-# --- 5. Define Logic ---
-# Re-initialize with the clean key
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash", 
-    temperature=0, 
-    google_api_key=api_key
-)
+# --- 5. Define Agents ---
 
 class AgentState(TypedDict):
     topic: str
@@ -82,6 +91,7 @@ class AgentState(TypedDict):
 
 def research_node(state: AgentState):
     topic = state["topic"]
+    # Uses whichever tool loaded successfully
     results = search_tool.run(f"recent news and facts about {topic}")
     return {"raw_research": results}
 
@@ -100,9 +110,8 @@ def analyst_node(state: AgentState):
     try:
         response = llm.invoke(messages)
         return {"draft_brief": response.content}
-    except Exception as e:
-        # Fallback if LLM fails mid-run
-        return {"draft_brief": "Error generating brief. Please try again."}
+    except Exception:
+        return {"draft_brief": "Error generating brief. Retrying..."}
 
 def fact_checker_node(state: AgentState):
     raw = state["raw_research"]
@@ -116,7 +125,7 @@ def fact_checker_node(state: AgentState):
         response = llm.invoke(messages)
         content = response.content
     except Exception:
-        content = "PASS" # Fail open if check fails
+        content = "PASS" # Fail open to avoid crashing
 
     if "FAIL" in content:
         return {"fact_check_feedback": content, "final_brief": None}
@@ -126,7 +135,7 @@ def fact_checker_node(state: AgentState):
 def router(state: AgentState):
     return "analyst" if state.get("fact_check_feedback") else "end"
 
-# Build Graph
+# --- 6. Build Graph ---
 workflow = StateGraph(AgentState)
 workflow.add_node("researcher", research_node)
 workflow.add_node("analyst", analyst_node)
@@ -139,7 +148,7 @@ workflow.add_conditional_edges("fact_checker", router, {"analyst": "analyst", "e
 
 app = workflow.compile()
 
-# --- 6. The UI ---
+# --- 7. The UI ---
 topic = st.text_input("Enter a meeting topic:", placeholder="e.g. OpenAI's recent safety news")
 
 if st.button("Run Agents"):
@@ -152,7 +161,7 @@ if st.button("Run Agents"):
             st.write("🕵️‍♂️ Fact-Checker is validating...")
             
             if result.get("fact_check_feedback"): 
-                st.warning(f"Fact Check Failed initially! Retrying... Feedback: {result['fact_check_feedback']}")
+                st.warning(f"Correction Triggered: {result['fact_check_feedback']}")
             
             status.update(label="✅ Workflow Complete!", state="complete", expanded=False)
             
