@@ -1,5 +1,5 @@
 streamlit
 langgraph
 langchain-google-genai
-duckduckgo-search
 langchain-community
+duckduckgo-search==5.3.1
