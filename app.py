@@ -1,6 +1,5 @@
 import operator
 import os
-import time
 from typing import Annotated, List, TypedDict
 
 import streamlit as st
@@ -10,7 +9,8 @@ from langgraph.graph import END, StateGraph
 
 # --- 1. Page Config ---
 st.set_page_config(page_title="Deep Intelligence Squad", page_icon="🧠", layout="wide")
-st.title("🧠 Deep Intelligence Engine (Auto-Select Mode)")
+st.title("🧠 Deep Intelligence Engine")
+st.markdown("### Powered by Multi-Agent Orchestration (Hybrid Search)")
 
 # --- 2. Imports ---
 try:
@@ -21,9 +21,8 @@ except ImportError as e:
     st.error(f"Missing Libraries: {e}")
     st.stop()
 
-# --- 3. AGGRESSIVE AUTO-SELECTION (The Fix) ---
+# --- 3. AUTO-CONNECT (The Proven Fix) ---
 def connect_to_google():
-    # 1. Get Key
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
     else:
@@ -36,8 +35,7 @@ def connect_to_google():
 
     genai.configure(api_key=clean_key)
     
-    # 2. ASK GOOGLE FOR THE EXACT NAMES
-    # We do not guess. We take what is given.
+    # Get Valid Models
     valid_models = []
     try:
         for m in genai.list_models():
@@ -48,18 +46,11 @@ def connect_to_google():
         st.stop()
 
     if not valid_models:
-        st.error("🚨 Your API Key has access to ZERO models. Please enable 'Generative Language API' in Google Cloud Console.")
+        st.error("🚨 No valid models found for this API key.")
         st.stop()
 
-    # 3. DEBUG: Show User what was found
-    with st.sidebar.expander("✅ Validated Models (Source of Truth)", expanded=True):
-        st.write(valid_models)
-
-    # 4. SELECT THE BEST AVAILABLE
-    # We prioritize Flash, then Pro, then whatever is first.
-    selected_model = valid_models[0] # Default to the first valid one
-    
-    # Try to find a better one in the list
+    # Pick Best Model
+    selected_model = valid_models[0] 
     for m in valid_models:
         if "flash" in m and "1.5" in m:
             selected_model = m
@@ -67,7 +58,7 @@ def connect_to_google():
     
     st.sidebar.success(f"Connected to: **{selected_model}**")
 
-    # 5. CONNECT
+    # Connect
     safety_config = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -87,19 +78,32 @@ def connect_to_google():
 # Initialize
 llm = connect_to_google()
 
-# --- 4. Search Tool ---
-class RealSearchTool:
+# --- 4. HYBRID SEARCH TOOL (The Fix for "No Results") ---
+class HybridSearchTool:
     def run(self, query):
+        # STRATEGY 1: Live Web Search
         try:
-            with st.spinner(f"🌐 Searching DuckDuckGo for '{query}'..."):
+            with st.spinner(f"🌐 Scouring DuckDuckGo for '{query}'..."):
                 results = DDGS().text(query, max_results=5)
                 if results:
-                    return str(results)
-                return "No web results found."
+                    return f"**SOURCE: LIVE WEB SEARCH**\n\n{str(results)}"
+        except Exception:
+            pass # Silent fail -> Go to fallback
+        
+        # STRATEGY 2: Gemini Internal Knowledge (The Safety Net)
+        # If web search fails/returns empty, we generate the data using the LLM itself.
+        try:
+            with st.spinner("Web search blocked. Retrieving from Internal Knowledge Base..."):
+                prompt = (
+                    f"You are a raw data collector. Provide a detailed, factual dump of information regarding: '{query}'. "
+                    "Include key dates, entities, and technical details. Do not summarize yet, just provide the raw facts."
+                )
+                response = llm.invoke(prompt)
+                return f"**SOURCE: GEMINI INTERNAL KNOWLEDGE (Hybrid Fallback)**\n\n{response.content}"
         except Exception as e:
-            return f"Search Error: {e}"
+            return f"CRITICAL ERROR: {e}"
 
-search_tool = RealSearchTool()
+search_tool = HybridSearchTool()
 
 # --- 5. Define Agents ---
 class AgentState(TypedDict):
@@ -111,11 +115,13 @@ class AgentState(TypedDict):
     messages: Annotated[List[str], operator.add]
 
 def research_node(state: AgentState):
+    """Researcher: Gets data from Web OR Internal Knowledge"""
     topic = state["topic"]
     results = search_tool.run(topic)
     return {"raw_research": results}
 
 def analyst_node(state: AgentState):
+    """Analyst: Summarizes the data (whatever it is)"""
     research_data = state["raw_research"]
     feedback = state.get("fact_check_feedback")
     
@@ -133,6 +139,7 @@ def analyst_node(state: AgentState):
     return {"draft_brief": response.content}
 
 def fact_checker_node(state: AgentState):
+    """Auditor: Verifies consistency"""
     raw = state["raw_research"]
     draft = state["draft_brief"]
     
@@ -160,11 +167,11 @@ workflow.add_conditional_edges("fact_checker", router, {"analyst": "analyst", "e
 app = workflow.compile()
 
 # --- 7. UI ---
-topic = st.text_input("Enter Topic:", placeholder="e.g. OpenAI vs Anthropic")
+topic = st.text_input("Enter Topic:", placeholder="e.g. NVIDIA AI Strategy")
 
 if st.button("Generate Intelligence"):
-    with st.status("🚀 Running...", expanded=True) as status:
-        st.write("🌍 Searching real web...")
+    with st.status("🚀 Engine Running...", expanded=True) as status:
+        st.write("🌍 Researcher gathering intelligence...")
         try:
             result = app.invoke({"topic": topic})
             st.write("🧠 Analyst processing...")
@@ -175,7 +182,8 @@ if st.button("Generate Intelligence"):
             
             status.update(label="✅ Complete!", state="complete", expanded=False)
             st.markdown(result["final_brief"])
-            with st.expander("View Real Source Data"):
+            with st.expander("View Source Data"):
+                # You will now see data here even if DDG fails!
                 st.write(result["raw_research"])
         except Exception as e:
             st.error(f"❌ EXECUTION FAILED: {e}")
