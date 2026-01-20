@@ -1,55 +1,28 @@
 import operator
 import os
-import time
 from typing import Annotated, List, TypedDict
 
 import streamlit as st
 from duckduckgo_search import DDGS
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 # --- 1. Page Config ---
 st.set_page_config(page_title="Deep Intelligence Squad", page_icon="🧠", layout="wide")
-st.title("🧠 Deep Intelligence Engine")
-st.markdown("### Powered by Multi-Agent Orchestration")
+st.title("🧠 Deep Intelligence Engine (Strict Mode)")
 
-# --- 2. Safe Imports ---
+# --- 2. Imports & Setup ---
 try:
     import google.generativeai as genai
     from langchain_google_genai import (ChatGoogleGenerativeAI,
                                         HarmBlockThreshold, HarmCategory)
-    LIBS_INSTALLED = True
-except ImportError:
-    st.error("⚠️ Libraries missing. Please Reboot App.")
+except ImportError as e:
+    st.error(f"CRITICAL: Missing Libraries. {e}")
     st.stop()
 
-# --- 3. The "Mock Brain" (Your Safety Net) ---
-class RobustMockLLM:
-    def invoke(self, messages):
-        last_msg = messages[-1].content if isinstance(messages, list) else str(messages)
-        time.sleep(1.5) # Simulate thinking
-        
-        if "DATA:" in last_msg: 
-            return AIMessage(content=(
-                "### Intelligence Report (Demo Mode)\n\n"
-                "**1. Strategic Dominance:** The subject has secured 40% market share in Q4.\n"
-                "**2. Technical Velocity:** New agentic frameworks are reducing latency by 30%.\n"
-                "**3. Risk Profile:** Regulatory headwinds in the EU remain the primary bottleneck.\n"
-                "**4. Financial Outlook:** Projected revenue growth of 22% YOY driven by AI adoption.\n"
-                "**5. Talent Density:** Aggressive hiring of research scientists from top competitors.\n"
-                "**6. Product Roadmap:** Pivot to 'Autonomous Squads' expected in next release.\n"
-                "**7. Customer Sentiment:** Net Promoter Score (NPS) rose to 72 post-launch.\n"
-                "**8. Infrastructure:** Heavy investment in H100 clusters to support training.\n"
-                "**9. Partnerships:** New strategic alliance with cloud providers announced.\n"
-                "**10. Conclusion:** Strong buy signal for enterprise integration."
-            ))
-        elif "SOURCE:" in last_msg:
-            return AIMessage(content="PASS")
-        else:
-            return AIMessage(content="I am ready.")
-
-# --- 4. The Logic to Connect (With 429 Protection) ---
-def get_resilient_llm():
+# --- 3. CONNECTION DIAGNOSTIC TOOL ---
+def connect_to_google():
+    # 1. Get Key
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
     else:
@@ -57,73 +30,81 @@ def get_resilient_llm():
     
     clean_key = api_key.strip().strip('"').strip("'")
     if not clean_key:
-        return RobustMockLLM(), "🟡 No Key (Mock Mode)"
+        st.error("🚨 STOP: No API Key found.")
+        st.stop()
+
+    # 2. Configure SDK
+    genai.configure(api_key=clean_key)
+    
+    # 3. LIST PERMITTED MODELS (Debug Info)
+    available_models = []
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+    except Exception as e:
+        st.error(f"🚨 API Key Check Failed: {e}")
+        st.stop()
+
+    # Show available models in sidebar for proof
+    st.sidebar.success(f"✅ Key Validated!")
+    with st.sidebar.expander("Authorized Models"):
+        for m in available_models:
+            st.write(f"- `{m}`")
+
+    # 4. SELECT THE BEST MODEL
+    # We prefer Flash, but if not found, we take Pro, then whatever is first.
+    selected_model = "models/gemini-pro" # Safe default
+    
+    for m in available_models:
+        if "gemini-1.5-flash" in m:
+            selected_model = m
+            break
+    
+    st.sidebar.info(f"Using: **{selected_model}**")
+
+    # 5. CONNECT LANGCHAIN
+    safety_config = {
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    }
 
     try:
-        genai.configure(api_key=clean_key)
-        
-        # Disable Safety Filters
-        safety_config = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-
-        # FORCE the standard stable model
-        model_name = "gemini-1.5-flash"
-
         llm = ChatGoogleGenerativeAI(
-            model=model_name,
+            model=selected_model,
             google_api_key=clean_key,
-            transport="rest",
-            safety_settings=safety_config
+            transport="rest",  # CRITICAL FIX for connection stability
+            safety_settings=safety_config,
+            temperature=0
         )
-        # HANDSHAKE TEST
-        llm.invoke("Hello") 
-        return llm, f"🟢 Connected: {model_name}"
-
+        # Final Handshake
+        llm.invoke("Hi")
+        return llm
     except Exception as e:
-        error_str = str(e)
-        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-            return RobustMockLLM(), "🟡 Quota Exceeded (Mock Active)"
-        elif "NOT_FOUND" in error_str:
-            # Fallback to Pro if Flash fails
-            try:
-                llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=clean_key, transport="rest", safety_settings=safety_config)
-                llm.invoke("Hello")
-                return llm, "🟢 Connected: gemini-pro"
-            except:
-                return RobustMockLLM(), "🟡 Model Error (Mock Active)"
-        else:
-            return RobustMockLLM(), "🟡 Connection Failed (Mock Active)"
+        st.error(f"🚨 Model Connection Failed: {e}")
+        st.stop()
 
-# Initialize
-llm, system_status = get_resilient_llm()
+# Initialize (This will stop the app if it fails, NO MOCKS)
+llm = connect_to_google()
 
-# --- 5. Search Tool ---
-class DeepSearchTool:
+# --- 4. Search Tool ---
+class RealSearchTool:
     def run(self, query):
         try:
-            with st.spinner(f"🌐 Scouring the web for '{query}'..."):
-                results = DDGS().text(query, max_results=8)
+            with st.spinner(f"🌐 Searching DuckDuckGo for '{query}'..."):
+                results = DDGS().text(query, max_results=5)
                 if results:
-                    return f"**SOURCE: LIVE WEB SEARCH**\n\n{str(results)}"
-        except Exception:
-            pass
-        
-        # Fallback to LLM Knowledge (or Mock if LLM is Mock)
-        try:
-            response = llm.invoke(f"Provide detailed facts on: {query}")
-            return f"**SOURCE: INTERNAL KNOWLEDGE**\n\n{response.content}"
-        except:
-            return "**SOURCE: OFFLINE ARCHIVE**\n\n(Simulated data for demo continuity)"
+                    return str(results)
+                else:
+                    return "No results found."
+        except Exception as e:
+            return f"Search Error: {e}"
 
-search_tool = DeepSearchTool()
+search_tool = RealSearchTool()
 
-st.sidebar.caption(f"Brain: {system_status}")
-
-# --- 6. Define Agents ---
+# --- 5. Define Agents ---
 class AgentState(TypedDict):
     topic: str
     raw_research: str
@@ -142,45 +123,36 @@ def analyst_node(state: AgentState):
     feedback = state.get("fact_check_feedback")
     
     prompt = (
-        "You are a Chief Intelligence Officer. "
-        "Produce a **Comprehensive Intelligence Report** (Markdown). "
-        "Include at least **10 key insights** categorized logically. "
-        "Strictly adhere to the facts provided."
+        "You are a Senior Intelligence Analyst. "
+        "Write a structured Intelligence Report based **ONLY** on the provided data. "
+        "Include 5 key strategic insights."
     )
     if feedback:
-        prompt += f"\n\n🚨 FIX AUDIT ISSUES: {feedback}"
+        prompt += f"\n\n🚨 FIX AUDIT FEEDBACK: {feedback}"
     
     messages = [SystemMessage(content=prompt), HumanMessage(content=f"DATA:\n{research_data}")]
     
-    # Safe Invoke
-    try:
-        response = llm.invoke(messages)
-        return {"draft_brief": response.content}
-    except:
-        return {"draft_brief": "Error generating report. Switching to backup display."}
+    # Direct Call (Will crash if LLM fails, verifying real connection)
+    response = llm.invoke(messages)
+    return {"draft_brief": response.content}
 
 def fact_checker_node(state: AgentState):
     raw = state["raw_research"]
     draft = state["draft_brief"]
     
-    prompt = "Compare REPORT to SOURCE. Reply 'PASS' or 'FAIL'."
+    prompt = "Compare REPORT to SOURCE. Reply 'PASS' or 'FAIL: <reason>'."
     messages = [SystemMessage(content=prompt), HumanMessage(content=f"SOURCE:\n{raw}\n\nREPORT:\n{draft}")]
     
-    try:
-        response = llm.invoke(messages)
-        content = response.content
-    except:
-        content = "PASS" # Fail open on error
-    
-    if "FAIL" in content:
-        return {"fact_check_feedback": content, "final_brief": None}
+    response = llm.invoke(messages)
+    if "FAIL" in response.content:
+        return {"fact_check_feedback": response.content, "final_brief": None}
     else:
         return {"fact_check_feedback": None, "final_brief": draft}
 
 def router(state: AgentState):
     return "analyst" if state.get("fact_check_feedback") else "end"
 
-# --- 7. Build Graph ---
+# --- 6. Build Graph ---
 workflow = StateGraph(AgentState)
 workflow.add_node("researcher", research_node)
 workflow.add_node("analyst", analyst_node)
@@ -191,21 +163,23 @@ workflow.add_edge("analyst", "fact_checker")
 workflow.add_conditional_edges("fact_checker", router, {"analyst": "analyst", "end": END})
 app = workflow.compile()
 
-# --- 8. The UI ---
-topic = st.text_input("Enter Topic:", placeholder="e.g. OpenAI vs Google Strategy")
+# --- 7. UI ---
+topic = st.text_input("Enter Topic:", placeholder="e.g. OpenAI vs Anthropic")
 
-if st.button("Generate Report"):
-    with st.status("🚀 Engine Running...", expanded=True) as status:
-        st.write("🌍 Researcher gathering intelligence...")
+if st.button("Run Real Intelligence"):
+    with st.status("🚀 Running Strict Mode (No Mocks)...", expanded=True) as status:
+        st.write("🌍 Searching real web...")
         try:
             result = app.invoke({"topic": topic})
-            st.write("🧠 Analyst compiling report...")
-            st.write("🛡️ Auditor verifying integrity...")
+            st.write("🧠 Analyst processing...")
+            st.write("🛡️ Verifying...")
             
             if result.get("fact_check_feedback"): 
-                st.warning(f"Correction Applied: {result['fact_check_feedback']}")
+                st.warning(f"Correction: {result['fact_check_feedback']}")
             
             status.update(label="✅ Complete!", state="complete", expanded=False)
             st.markdown(result["final_brief"])
+            with st.expander("View Real Source Data"):
+                st.write(result["raw_research"])
         except Exception as e:
-            st.error(f"Workflow Failed: {e}")
+            st.error(f"❌ EXECUTION FAILED: {e}")
