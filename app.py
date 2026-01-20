@@ -12,25 +12,45 @@ st.set_page_config(page_title="Meeting Prep Squad", page_icon="🤖")
 st.title("🤖 Multi-Agent Meeting Prep Squad")
 st.markdown("### Powered by LangGraph & Gemini Flash")
 
-# --- 2. API Key Setup ---
-# Checks for key in Streamlit Secrets (Cloud) or Environment (Local)
-if "GOOGLE_API_KEY" not in st.secrets and "GOOGLE_API_KEY" not in os.environ:
+# --- 2. API Key Setup & Sanitization ---
+# Get key from Secrets or Env
+if "GOOGLE_API_KEY" in st.secrets:
+    raw_key = st.secrets["GOOGLE_API_KEY"]
+elif "GOOGLE_API_KEY" in os.environ:
+    raw_key = os.environ["GOOGLE_API_KEY"]
+else:
     st.error("🚨 Missing Google API Key.")
-    st.info("To fix: Go to your Streamlit App -> Settings -> Secrets and add `GOOGLE_API_KEY = 'your_key'`")
     st.stop()
 
-# Set key for the library
-api_key = st.secrets.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_API_KEY"))
-os.environ["GOOGLE_API_KEY"] = api_key
+# CLEAN THE KEY: Remove quotes (" or ') and whitespace
+api_key = raw_key.strip().strip('"').strip("'")
 
-# --- 3. Resilient Tool Setup (The "PM Fix") ---
-# This block prevents the app from crashing if the search library has issues.
+# --- 3. Immediate Connection Test ---
+# We test the key right now. If this fails, the app stops here with a clear message.
+try:
+    test_llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash", 
+        google_api_key=api_key
+    )
+    # Simple handshake
+    test_llm.invoke("Hello")
+except Exception as e:
+    st.error("❌ API Key Connection Failed")
+    st.markdown(f"**Error Details:** `{e}`")
+    st.warning(
+        "**Possible Causes:**\n"
+        "1. **API Not Enabled:** Go to [Google Cloud Console](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com) and enable 'Generative Language API'.\n"
+        "2. **Bad Key:** You might need to generate a new key.\n"
+        "3. **Billing:** (Rare) Your free quota might be exhausted."
+    )
+    st.stop()
+
+# --- 4. Resilient Tool Setup ---
 try:
     from langchain_community.tools import DuckDuckGoSearchRun
     search_tool = DuckDuckGoSearchRun()
     tool_status = "Live Web Search 🟢"
-except Exception as e:
-    # Fallback to a mock tool if the library fails to load
+except Exception:
     tool_status = "Simulated Search (Backup) 🟡"
     class MockSearch:
         def run(self, query):
@@ -44,8 +64,13 @@ except Exception as e:
 
 st.sidebar.caption(f"System Status: {tool_status}")
 
-# --- 4. Define Logic ---
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+# --- 5. Define Logic ---
+# Re-initialize with the clean key
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash", 
+    temperature=0, 
+    google_api_key=api_key
+)
 
 class AgentState(TypedDict):
     topic: str
@@ -57,7 +82,6 @@ class AgentState(TypedDict):
 
 def research_node(state: AgentState):
     topic = state["topic"]
-    # Uses whichever tool loaded successfully (Live or Mock)
     results = search_tool.run(f"recent news and facts about {topic}")
     return {"raw_research": results}
 
@@ -73,8 +97,12 @@ def analyst_node(state: AgentState):
         prompt += f"\n\nPREVIOUS DRAFT FAILED FACT-CHECK. Feedback: {feedback}"
     
     messages = [SystemMessage(content=prompt), HumanMessage(content=f"DATA:\n{research_data}")]
-    response = llm.invoke(messages)
-    return {"draft_brief": response.content}
+    try:
+        response = llm.invoke(messages)
+        return {"draft_brief": response.content}
+    except Exception as e:
+        # Fallback if LLM fails mid-run
+        return {"draft_brief": "Error generating brief. Please try again."}
 
 def fact_checker_node(state: AgentState):
     raw = state["raw_research"]
@@ -84,16 +112,18 @@ def fact_checker_node(state: AgentState):
         "If faithful, reply 'PASS'. If hallucinated, reply 'FAIL: <reason>'."
     )
     messages = [SystemMessage(content=prompt), HumanMessage(content=f"SOURCE:\n{raw}\n\nDRAFT:\n{draft}")]
-    response = llm.invoke(messages)
-    
-    # Simple logic: If the LLM says "FAIL", we loop back.
-    if "FAIL" in response.content:
-        return {"fact_check_feedback": response.content, "final_brief": None}
+    try:
+        response = llm.invoke(messages)
+        content = response.content
+    except Exception:
+        content = "PASS" # Fail open if check fails
+
+    if "FAIL" in content:
+        return {"fact_check_feedback": content, "final_brief": None}
     else:
         return {"fact_check_feedback": None, "final_brief": draft}
 
 def router(state: AgentState):
-    # If feedback exists, go back to analyst. Otherwise end.
     return "analyst" if state.get("fact_check_feedback") else "end"
 
 # Build Graph
@@ -109,24 +139,27 @@ workflow.add_conditional_edges("fact_checker", router, {"analyst": "analyst", "e
 
 app = workflow.compile()
 
-# --- 5. The UI ---
+# --- 6. The UI ---
 topic = st.text_input("Enter a meeting topic:", placeholder="e.g. OpenAI's recent safety news")
 
 if st.button("Run Agents"):
     with st.status("🤖 Agents are working...", expanded=True) as status:
         st.write("🔎 Researcher is searching...")
-        result = app.invoke({"topic": topic})
-        
-        st.write("📝 Analyst is drafting...")
-        st.write("🕵️‍♂️ Fact-Checker is validating...")
-        
-        if result.get("fact_check_feedback"): 
-            st.warning(f"Fact Check Failed initially! Retrying... Feedback: {result['fact_check_feedback']}")
-        
-        status.update(label="✅ Workflow Complete!", state="complete", expanded=False)
+        try:
+            result = app.invoke({"topic": topic})
+            
+            st.write("📝 Analyst is drafting...")
+            st.write("🕵️‍♂️ Fact-Checker is validating...")
+            
+            if result.get("fact_check_feedback"): 
+                st.warning(f"Fact Check Failed initially! Retrying... Feedback: {result['fact_check_feedback']}")
+            
+            status.update(label="✅ Workflow Complete!", state="complete", expanded=False)
+            
+            st.subheader("Final Executive Briefing")
+            st.success(result["final_brief"])
 
-    st.subheader("Final Executive Briefing")
-    st.success(result["final_brief"])
-
-    with st.expander("See Raw Research Data"):
-        st.text(result["raw_research"])
+            with st.expander("See Raw Research Data"):
+                st.text(result["raw_research"])
+        except Exception as e:
+            st.error(f"Workflow Failed: {e}")
