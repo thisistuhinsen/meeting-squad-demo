@@ -3,18 +3,26 @@ import os
 import time
 from typing import Annotated, List, TypedDict
 
-import google.generativeai as genai
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, StateGraph
 
 # --- 1. Page Config ---
 st.set_page_config(page_title="Meeting Prep Squad", page_icon="🤖")
 st.title("🤖 Multi-Agent Meeting Prep Squad")
-st.markdown("### Powered by LangGraph & Gemini")
+st.markdown("### Powered by LangGraph & Gemini (Real Data Mode)")
 
-# --- 2. The "Model Hunter" Logic (The Fix) ---
+# --- 2. Safe Imports ---
+try:
+    import google.generativeai as genai
+    from langchain_google_genai import (ChatGoogleGenerativeAI,
+                                        HarmBlockThreshold, HarmCategory)
+    LIBS_INSTALLED = True
+except ImportError:
+    st.error("⚠️ Libraries missing. Please Reboot App.")
+    st.stop()
+
+# --- 3. The Logic to Find a Working Model ---
 def get_working_llm():
     # 1. Get Key
     if "GOOGLE_API_KEY" in st.secrets:
@@ -25,59 +33,50 @@ def get_working_llm():
     clean_key = api_key.strip().strip('"').strip("'")
     
     if not clean_key:
-        return None, "🟡 No API Key (Mock Mode)"
+        st.error("🚨 No API Key found.")
+        st.stop()
 
-    # 2. Configure the official SDK
-    genai.configure(api_key=clean_key)
-    
-    found_model_name = None
-
+    # 2. Configure & Connect
     try:
-        # Ask Google: "What models can I use?"
-        st.toast("🔍 Scanning for available Gemini models...", icon="📡")
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # Prefer Flash, but take anything that works
-                if 'flash' in m.name:
-                    found_model_name = m.name
-                    break
-                elif 'pro' in m.name and not found_model_name:
-                    found_model_name = m.name # Fallback
+        genai.configure(api_key=clean_key)
         
-        if not found_model_name:
-            # Last resort fallback if list_models implies access but returns weird names
-            found_model_name = "gemini-1.5-flash" 
+        # Hunt for a working model name
+        found_model = "gemini-1.5-flash" # Default
+        try:
+            # Quick scan for valid models
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    if 'flash' in m.name:
+                        found_model = m.name
+                        break
+        except:
+            pass 
 
-        # 3. Connect using the FOUND name
+        # 3. SAFETY SETTINGS (The Fix for "Silent Failures")
+        # We allow ALL content so the model doesn't block innocent news summaries.
+        safety_config = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+
         llm = ChatGoogleGenerativeAI(
-            model=found_model_name,
+            model=found_model,
             google_api_key=clean_key,
-            transport="rest", # Crucial for India/Streamlit Cloud stability
-            temperature=0
+            transport="rest", # REST is stable
+            temperature=0,
+            safety_settings=safety_config
         )
-        # Handshake test
-        llm.invoke("Hello")
-        return llm, f"🟢 Connected: {found_model_name}"
+        # Real Handshake
+        llm.invoke("Hello") 
+        return llm, f"🟢 Connected: {found_model}"
 
     except Exception as e:
-        st.error(f"Debug Error: {e}")
-        return None, "🟡 Connection Failed (Mock Mode)"
+        return None, f"🔴 Error: {e}"
 
-# --- 3. Robust Mock LLM (Safety Net) ---
-class RobustMockLLM:
-    def invoke(self, messages):
-        last_msg = messages[-1].content if isinstance(messages, list) else str(messages)
-        time.sleep(1.2)
-        if "DATA:" in last_msg: 
-            return AIMessage(content="### Briefing (Mock)\n* **News:** Microsoft AI revenue +20%.\n* **Strategy:** Agents are the new apps.")
-        elif "SOURCE:" in last_msg:
-            return AIMessage(content="PASS")
-        else:
-            return AIMessage(content="Ready.")
-
-# Initialize
-real_llm, system_status = get_working_llm()
-llm = real_llm if real_llm else RobustMockLLM()
+# Initialize System
+llm, system_status = get_working_llm()
 
 # --- 4. Tool Setup ---
 try:
@@ -85,17 +84,16 @@ try:
     search_tool = DuckDuckGoSearchRun()
     tool_status = "🟢 Live Search"
 except Exception:
-    tool_status = "🟡 Mock Search"
+    tool_status = "🔴 Search Failed"
+    # Fallback only if import fails
     class MockSearch:
-        def run(self, query):
-            return "Latest news: AI agent adoption is skyrocketing in 2025. Companies are moving from chatbots to autonomous squads."
+        def run(self, query): return "Search Tool Broken."
     search_tool = MockSearch()
 
-# Sidebar Status
 st.sidebar.caption(f"Brain: {system_status}")
 st.sidebar.caption(f"Tools: {tool_status}")
 
-# --- 5. Define Agents ---
+# --- 5. Define Agents (NO MOCKING ALLOWED) ---
 class AgentState(TypedDict):
     topic: str
     raw_research: str
@@ -114,28 +112,27 @@ def analyst_node(state: AgentState):
     feedback = state.get("fact_check_feedback")
     prompt = (
         "You are a senior executive assistant. "
-        "Create a concise, 3-bullet briefing based ONLY on the provided research text."
+        "Create a concise, 3-bullet briefing based ONLY on the provided research text. "
+        "Do not add any outside information."
     )
     if feedback:
         prompt += f"\n\nFIX FEEDBACK: {feedback}"
     
     messages = [SystemMessage(content=prompt), HumanMessage(content=f"DATA:\n{research_data}")]
-    try:
-        response = llm.invoke(messages)
-        return {"draft_brief": response.content}
-    except:
-        return {"draft_brief": "Error generating brief. (Mock Result)"}
+    
+    # DIRECT CALL - No Try/Except to hide errors
+    response = llm.invoke(messages)
+    return {"draft_brief": response.content}
 
 def fact_checker_node(state: AgentState):
     raw = state["raw_research"]
     draft = state["draft_brief"]
     prompt = "Compare DRAFT to SOURCE. Reply 'PASS' or 'FAIL'."
     messages = [SystemMessage(content=prompt), HumanMessage(content=f"SOURCE:\n{raw}\n\nDRAFT:\n{draft}")]
-    try:
-        response = llm.invoke(messages)
-        content = response.content
-    except:
-        content = "PASS"
+    
+    # DIRECT CALL - No Try/Except
+    response = llm.invoke(messages)
+    content = response.content
 
     if "FAIL" in content:
         return {"fact_check_feedback": content, "final_brief": None}
@@ -157,13 +154,18 @@ workflow.add_conditional_edges("fact_checker", router, {"analyst": "analyst", "e
 app = workflow.compile()
 
 # --- 7. The UI ---
-topic = st.text_input("Enter meeting topic:", placeholder="e.g. Microsoft Copilot Strategy")
+topic = st.text_input("Enter meeting topic:", placeholder="e.g. OpenAI's recent safety news")
 
 if st.button("Run Workflow"):
+    if not llm:
+        st.error("Cannot run: LLM not connected.")
+        st.stop()
+
     with st.status("🚀 Processing...", expanded=True) as status:
         st.write("🔎 Researcher is gathering data...")
         try:
             result = app.invoke({"topic": topic})
+            
             st.write("📝 Analyst is writing brief...")
             st.write("⚖️ Fact-Checker is validating...")
             
@@ -171,9 +173,12 @@ if st.button("Run Workflow"):
                 st.warning(f"Correction Triggered: {result['fact_check_feedback']}")
             
             status.update(label="✅ Done!", state="complete", expanded=False)
+            
             st.subheader("Final Briefing")
             st.success(result["final_brief"])
+
             with st.expander("Raw Data"):
                 st.write(result["raw_research"])
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Execution Error: {e}")
+            st.info("If this error mentions 'Safety', the model blocked the news content.")
