@@ -67,4 +67,4 @@ I chose a **Multi-Agent** approach over a single prompt because it allows for:
 3.  **Extensibility:** We can easily swap the "DuckDuckGo" tool for an internal "SharePoint Search" tool without breaking the rest of the chain.
 
 ---
-*Created by [Your Name] as a demonstration of Agentic AI Engineering & Product Management.*
+*Created by me as a demonstration of Agentic AI Engineering & Product Management.*
